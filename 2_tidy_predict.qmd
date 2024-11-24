@@ -3,6 +3,7 @@ title: "Predictive genomics using tidymodels and XGBoost"
 subtitle: "Example Workflow"
 author: "Frederik Ziebell"
 date: last-modified
+date-format: long
 format: 
   html:
     embed-resources: true
