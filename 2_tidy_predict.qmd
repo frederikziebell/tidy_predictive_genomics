@@ -1,0 +1,553 @@
+---
+title: "Predictive genomics using tidymodels and XGBoost"
+subtitle: "Example Workflow"
+author: "Frederik Ziebell"
+date: last-modified
+format: 
+  html:
+    embed-resources: true
+    toc: true
+    toc-expand: true
+    toc-location: left
+    toc-title: Contents
+    theme: flatly
+    code-copy: true
+    code-overflow: scroll
+    highlight-style: arrow
+    page-layout: full
+  gfm:
+    html-math-method: webtex
+knitr:
+  opts_chunk:
+    out.width: "75%"
+    fig.align: "center"
+number-sections: false
+execute:
+  message: false
+  warning: false
+  cache: false
+bibliography: references.bib
+csl: nature.csl
+abstract: Understanding which genomic features are predictive of an outcome such as disease progression can give insights into a disease mechanism and allows to discover new biomarkers. In this workflow, we show on the example of a clinical data set how to run machine learning models on genomic data and how to combine it with clinical covariates. We use the tidymodels framework, which provides a unified interface to many machine learning libraries, to predict continuous and categorical outomes using the XGBoost library. We also show how extract information on feature importance, goodness of fit, and how to determine prediction accuracy on a per-observation level.
+---
+
+```{r}
+#| echo: false
+options(width = 999, digits=3)
+library("printr")
+```
+
+# Preparations
+We start with loading all relevant data and packages.
+```{r}
+library("parallelly")
+library("future")
+library("tidymodels")
+library("vip")
+library("RNAseqQC")
+library("ggbeeswarm")
+library("cowplot")
+library("tidyverse")
+theme_set(theme_cowplot())
+```
+
+# Load data
+We use a dataset of 50 severe and 50 mild-moderate COVID-19 patients, for which 893 plasma proteins were profiled along with clinical covariates  [@al2022prognostic]. The data come in two parts. First, a proteins $\times$ patients matrix of protein abundance measurements, which are given by Olink normalized protein expression (NPX) values [@olink].
+```{r}
+#| output: false
+assay <- readRDS("data/assay.rds")
+dim(assay)
+assay
+```
+
+
+```{r}
+#| echo: false
+dim(readRDS("data/assay.rds"))
+readRDS("data/assay.rds")[1:10,1:10]
+```
+
+Second, a `data.frame` of clinical covariates of the patients, such as disease grading, oxygen saturation or co-morbidities. The rows in the data frame are ordered to correspond to the columns of the assay matrix.
+```{r}
+metadata <- readRDS("data/metadata.rds")
+glimpse(metadata)
+```
+
+# Explore data
+Before we start with predicting an outcome, it is always advisable to look at the data. To get a first rough idea for the data, we only create a scatter matrix of PCA plots and plot it by one outcome of interest (incidentally called *outcome*). For a thorough analysis, a more detailed exploratory analysis step would be needed.
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+#| out-width: 95%
+plot_pca_scatters(assay, metadata = metadata, color_by="outcome", n_PCs = 4)
+```
+
+# Combine data objects
+As a first example, we try to predict the disease grading. Although the original publication does not mention how the grading score is computed, it seems to refer to the Ordinal Scale for Clinical Improvement as published in the WHO COVID-19 Therapeutic Trial Synopsis [@covid19therapeutic]. There, disease grading is a score from 0 (uninfected) to 8 (dead) based the level of required oxygen and renal support. 
+
+We combine all potential predictors, i.e. the the assay matrix and metadata, into a `data.frame` where each column is a variable and each row is an observation (patient). Finally, we add a column `y`, which contains our outcome of interest.
+```{r}
+predictors_meta <- metadata[,!names(metadata) %in% "Grading"]
+
+data <- data.frame(t(assay)) %>%
+  cbind(predictors_meta) %>%
+  cbind(y = metadata$Grading)
+```
+
+# Train model
+Training a model works in several steps. First, we prepare the input data for the model by defining a *recipe* which specifies the outcome and predictors in the data set. We also specify to dummy code nominal predictors.
+```{r}
+rec <- recipe(y ~ ., data) %>% 
+  step_unknown(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors())
+```
+
+Next, we define the model to use for prediction, in this case a regression model by means of the XGBoost library. XGBoost has a number of hyperparameters such as the learning rate or tree depth, which influence model performance. We will infer these parameters by assessing model performance for different parameter combinations and finally choose the model with maximum performance.
+```{r}
+# define model
+model <- boost_tree(
+  mode = "regression", 
+  engine = "xgboost",
+  trees = tune(),
+  min_n = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune()
+)
+
+# define tuning parameters
+params <- parameters(
+  trees(),
+  min_n(),
+  tree_depth(),
+  learn_rate(),
+  loss_reduction()
+)
+```
+
+The defined recipe and model are combined in a workflow, which is then run on a set of hyperparameter combinations to infer the best model. For this, we define a grid of 100 points in parameter space at which model performance is assessed. Performance is measured as out of sample prediction accuracy during cross validation. Parameter tuning takes a long time, about 40min on an Intel Core i7-10510U CPU. If you want to reproduce this workflow and don't want to wait that long, you can uncomment the last line in the following code block.
+```{r}
+#| eval: false
+
+# modeling workflow
+wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model)
+
+# set up grid search for tuning parameters
+set.seed(1)
+grid <- grid_space_filling(params, size = 100)
+
+# set up cross validation
+set.seed(2)
+folds <- vfold_cv(data, v = 10)
+
+# parallel processing
+n_workers <- max(1, length(availableWorkers())-1)
+plan("multisession", workers = n_workers)
+
+# tune parameters
+model_res <- tune_grid(
+  object = wf,
+  resamples = folds,
+  grid = grid,
+  metrics = metric_set(rmse),
+  control = control_grid(
+    verbose = F,
+    parallel_over = "everything",
+    save_pred = T
+  )
+)
+# model_res <- readRDS("data/model_res_regression.rds")
+```
+
+```{r}
+#| echo: false
+
+# modeling workflow
+wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model)
+
+# set up grid search for tuning parameters
+set.seed(1)
+grid <- grid_space_filling(params, size = 100)
+
+# set up cross validation
+set.seed(2)
+folds <- vfold_cv(data, v = 10)
+
+# parallel processing
+n_workers <- max(1, length(availableWorkers())-1)
+plan("multisession", workers = n_workers)
+
+# tune parameters
+# # 2300sec
+# tictoc::tic()
+# suppressMessages({
+# model_res <- tune_grid(
+#   object = wf,
+#   resamples = folds,
+#   grid = grid,
+#   metrics = metric_set(rmse),
+#   # parallel not only over the folds, since we have
+#   # more cores than folds available
+#   control = control_grid(
+#     verbose = F,
+#     parallel_over = "everything",
+#     save_pred = T
+#   )
+# )
+# })
+# tictoc::toc()
+# saveRDS(model_res, "data/model_res_regression.rds")
+model_res <- readRDS("data/model_res_regression.rds")
+```
+
+After tuning is completed, we have a look at the top 5 best performing models and select the best one for a final round of fitting.
+```{r}
+#| output: false
+# best models
+show_best(model_res, metric = "rmse")
+best_params <- select_best(model_res)
+```
+
+```{r}
+#| echo: false
+show_best(model_res, metric = "rmse")
+```
+
+# Finalize model
+To get a thorough understanding of the selected model, we repeat the 10-fold cross validation for 5 times, leading to 5 predictions of each data point. During this process, we also extract variable importance using the vip package. Variable importance is computed for each fold of each repeat, leading to 50 importance values per variable.
+```{r}
+#| eval: false
+model_final <- finalize_model(model, best_params)
+
+set.seed(3)
+folds_repeated <- vfold_cv(data, v = 10, repeats = 5)
+
+final_fit <- wf %>%
+  update_model(model_final) %>%
+  fit_resamples(
+    folds_repeated,
+    control = control_resamples(
+      extract = vip::vi,
+      parallel_over = "everything",
+      save_pred = TRUE
+    )
+  )
+```
+
+```{r}
+#| echo: false
+model_final <- finalize_model(model, best_params)
+
+set.seed(3)
+folds_repeated <- vfold_cv(data, v = 10, repeats = 5)
+
+# final_fit <- wf %>%
+#   update_model(model_final) %>%
+#   fit_resamples(
+#     folds_repeated,
+#     control = control_resamples(
+#       extract = vip::vi,
+#       parallel_over = "everything",
+#       save_pred = TRUE
+#     )
+#   )
+# saveRDS(final_fit, "data/final_fit_regression.rds")
+final_fit <- readRDS("data/final_fit_regression.rds")
+```
+
+# Assess final model
+We will make several plots to understand the final model. First, let's visualize the goodness of fit by plotting observed versus predicted values for each observation of the response. Since we did repeated cross cross validation, we can make this plot for each of the repeats. In our case, predicting disease grading gave mediocre results, with $R¹2\approx 0.75$. 
+```{r}
+#| fig-width: 12
+#| fig-height: 4
+#| out-width: 95%
+
+# R^2 per repeat
+r2 <- final_fit %>% 
+  select(id, .predictions) %>% 
+  unnest(.predictions) %>% 
+  group_by(id) %>% 
+  summarize(r2 = 1-sum((y-.pred)^2)/sum((y-mean(y))^2))
+
+facet_labs <- imap_chr(r2$r2, ~str_c("Repeat",.y,"\nR^2 = ",round(.x,3))) %>% 
+  `names<-`(str_c("Repeat",seq_along(r2$r2)))
+
+# observed vs. predicted response
+final_fit %>% 
+  select(id, .predictions) %>% 
+  unnest(.predictions) %>% 
+  left_join(r2, by="id") %>% 
+  ggplot(aes(y, .pred)) +
+    geom_point(alpha = .3, size = rel(2)) +
+    geom_abline(linetype = "42") +
+    coord_fixed() +
+    facet_wrap(~id, labeller = as_labeller(facet_labs), nrow = 1) +  
+    labs(
+      x = "observed", y = "predicted",
+      title = "observed vs. predicted values"
+    )
+```
+
+Second, we can show which features were the most important for the prediction. Unsurprisingly, $\text{O}_2$ supplementation was the most important variable in our case study, as the amount of oxygen supply is the major factor based on which disease grading is carried out [@covid19therapeutic]. Interestingly, the most important gene to predict the disease grade is CTSL, which cleaves the S1 subunit of the SARS-CoV-2 spike protein and is essential for virus entry into the cell [@zhao2022novel].
+```{r}
+# feature importance
+n_top <- 10
+final_fit %>% 
+  select(id, id2, .extracts) %>% 
+  unnest(.extracts) %>% 
+  unnest(.extracts) %>%
+  complete(id, id2, nesting(Variable), fill=list(Importance=0)) %>% 
+  group_by(Variable) %>% 
+  mutate(mean_importance = mean(Importance)) %>% 
+  ungroup() %>% 
+  arrange(-mean_importance) %>% 
+  mutate(Variable = fct_inorder(factor(Variable))) %>%
+  filter(as.integer(Variable) <= n_top) %>% 
+  ggplot(aes(Variable, Importance)) +
+    geom_boxplot(outlier.shape = NA) +
+    ggbeeswarm::geom_quasirandom(alpha = .2) +
+    labs(x = NULL, title = "feature importance") +
+    coord_flip() +
+    scale_x_discrete(limits = rev)
+```
+
+Third, we can ask which observations are harder to predict than others. This can be done by plotting the residuals of each observation. Note that there is more than one residual per observation, owing to the repeated cross validation.
+```{r}
+# residuals per observation
+bind_rows(final_fit$.predictions) %>%
+  mutate(obs_name = rownames(data)[.row]) %>%
+  mutate(resid = .pred - y) %>%
+  group_by(.row) %>%
+  mutate(mean_resid=mean(resid)) %>% 
+  ungroup() %>% 
+  arrange(-mean_resid) %>% 
+  mutate(obs_name = fct_inorder(factor(obs_name))) %>% 
+  ggplot(aes(obs_name, resid)) +
+    geom_hline(yintercept = 0, color = "gray62", linetype = "63") +
+    stat_summary(
+      geom = "linerange",
+      fun.data = mean_sdl, 
+      fun.args = list(mult = 1)
+    ) +
+    stat_summary(
+      geom = "point", 
+      fun = mean
+    ) +
+    labs(x = "observations", y = "predicted - observed value") +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+```
+
+# Predict overall outcome
+XGBoost cannot only be used for regression tasks, i.e. predicting a numeric response, but also for classification, i.e. predicting a categorical response. To showcase this task, we choose to predict the *outcome* of each patient, which denotes whether the patient survived with or without disability, or died.
+```{r}
+table(metadata$outcome)
+```
+
+The process for classification follows almost exactly the same steps as the one for regression. We only have to define the mode *classification* in the `boost_tree()` specification and show a confusion matrix to compare observed and predicted class labels. As can be seen, the model poorly predicts the outcome. The reason for this could be that the classes are highly imbalanced classes but it is also possible that the outcome can fundamentally not be predicted from the genomic readout and clinical covariates.
+```{r}
+#| eval: false
+predictors_meta <- metadata[,!names(metadata) %in% "outcome"]
+
+data <- data.frame(t(assay)) %>%
+  cbind(predictors_meta) %>%
+  cbind(y = metadata$outcome)
+
+rec <- recipe(y ~ ., data) %>% 
+  step_unknown(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors())
+
+# define model
+model <- boost_tree(
+  mode = "classification", engine = "xgboost",
+  trees = tune(),
+  min_n = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune()
+)
+
+set.seed(1)
+grid <- grid_space_filling(params, size = 100)
+
+wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model)
+
+set.seed(2)
+folds <- vfold_cv(data, v = 10)
+
+model_res <- tune_grid(
+  object = wf,
+  resamples = folds,
+  grid = grid,
+  control = control_grid(
+    verbose = F,
+    parallel_over = "everything",
+    save_pred = T
+  )
+)
+
+best_params <- select_best(model_res)
+
+model_final <- finalize_model(model, best_params)
+
+set.seed(3)
+folds_repeated <- vfold_cv(data, v = 10, repeats = 5)
+
+final_fit <- wf %>%
+  update_model(model_final) %>%
+  fit_resamples(
+    folds_repeated,
+    control = control_resamples(
+      extract = vip::vi,
+      parallel_over = "everything",
+      save_pred = TRUE
+    )
+  )
+
+final_fit %>%
+  select(id, id2, .predictions) %>%
+  unnest(.predictions) %>%
+  select(id, .pred_class, y) %>%
+  group_by(id) %>%
+  group_split() %>%
+  map_dfr(~data.frame(table(.x))) %>% 
+  ggplot(aes(y,.pred_class, fill=Freq, label=Freq)) +
+    geom_tile() +
+    geom_text() +
+    facet_wrap(~id, nrow = 1) +
+    scale_fill_gradient(low="white", high="royalblue3") +
+    labs(x = "observed class", y="predicted class") +
+    theme(axis.text.x = element_text(angle=90, hjust=1, vjust=.5)) +
+    coord_fixed()
+
+final_fit %>% 
+  select(id, id2, .extracts) %>% 
+  unnest(.extracts) %>% 
+  unnest(.extracts) %>%
+  complete(id, id2, nesting(Variable), fill=list(Importance=0)) %>% 
+  group_by(Variable) %>% 
+  mutate(mean_importance = mean(Importance)) %>% 
+  ungroup() %>% 
+  arrange(-mean_importance) %>% 
+  mutate(Variable = fct_inorder(factor(Variable))) %>%
+  filter(as.integer(Variable) <= n_top) %>% 
+  ggplot(aes(Variable, Importance)) +
+    geom_boxplot(outlier.shape = NA) +
+    ggbeeswarm::geom_quasirandom(alpha = .2) +
+    labs(x = NULL, title = "feature importance") +
+    coord_flip() +
+    scale_x_discrete(limits = rev)
+```
+
+```{r}
+#| echo: false
+#| fig-width: 10
+#| fig-height: 4
+#| out-width: 95%
+
+predictors_meta <- metadata[,!names(metadata) %in% "outcome"]
+
+data <- data.frame(t(assay)) %>%
+  cbind(predictors_meta) %>%
+  cbind(y = metadata$outcome)
+
+rec <- recipe(y ~ ., data) %>% 
+  step_unknown(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors())
+
+# define model
+model <- boost_tree(
+  mode = "classification", engine = "xgboost",
+  trees = tune(),
+  min_n = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune()
+)
+
+set.seed(1)
+grid <- grid_space_filling(params, size = 100)
+
+wf <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model)
+
+set.seed(2)
+folds <- vfold_cv(data, v = 10)
+
+# 2500 sec
+# tictoc::tic()
+# model_res <- tune_grid(
+#   object = wf,
+#   resamples = folds,
+#   grid = grid,
+#   control = control_grid(
+#     verbose = F,
+#     parallel_over = "everything",
+#     save_pred = T
+#   )
+# )
+# tictoc::toc()
+# saveRDS(model_res, "data/model_res_classification.rds")
+model_res <- readRDS("data/model_res_classification.rds")
+
+best_params <- select_best(model_res)
+
+model_final <- finalize_model(model, best_params)
+
+set.seed(3)
+folds_repeated <- vfold_cv(data, v = 10, repeats = 5)
+
+# final_fit <- wf %>%
+#   update_model(model_final) %>%
+#   fit_resamples(
+#     folds_repeated,
+#     control = control_resamples(
+#       extract = vip::vi,
+#       parallel_over = "everything",
+#       save_pred = TRUE
+#     )
+#   )
+# saveRDS(final_fit, "data/final_fit_classification.rds")
+final_fit <- readRDS("data/final_fit_classification.rds")
+
+final_fit %>%
+  select(id, id2, .predictions) %>%
+  unnest(.predictions) %>%
+  select(id, .pred_class, y) %>%
+  group_by(id) %>%
+  group_split() %>%
+  map_dfr(~data.frame(table(.x))) %>% 
+  ggplot(aes(y,.pred_class, fill=Freq, label=Freq)) +
+    geom_tile() +
+    geom_text() +
+    facet_wrap(~id, nrow = 1) +
+    scale_fill_gradient(low="white", high="royalblue3") +
+    labs(x = "observed class", y="predicted class") +
+    theme(axis.text.x = element_text(angle=90, hjust=1, vjust=.5)) +
+    coord_fixed()
+
+final_fit %>% 
+  select(id, id2, .extracts) %>% 
+  unnest(.extracts) %>% 
+  unnest(.extracts) %>%
+  complete(id, id2, nesting(Variable), fill=list(Importance=0)) %>% 
+  group_by(Variable) %>% 
+  mutate(mean_importance = mean(Importance)) %>% 
+  ungroup() %>% 
+  arrange(-mean_importance) %>% 
+  mutate(Variable = fct_inorder(factor(Variable))) %>%
+  filter(as.integer(Variable) <= n_top) %>% 
+  ggplot(aes(Variable, Importance)) +
+    geom_boxplot(outlier.shape = NA) +
+    ggbeeswarm::geom_quasirandom(alpha = .2) +
+    labs(x = NULL, title = "feature importance") +
+    coord_flip() +
+    scale_x_discrete(limits = rev)
+```

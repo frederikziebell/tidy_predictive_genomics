@@ -1,0 +1,65 @@
+# preparations
+```{r}
+library("readxl")
+library("tidyverse")
+```
+
+# load data
+```{r}
+data_file <- "data/41467_2022_28639_MOESM5_ESM.xlsx"
+
+mat <- read_xlsx(data_file, sheet = 1, skip = 5) %>% 
+  column_to_rownames("OlinkID") %>% 
+  as.matrix() %>% 
+  t() %>% 
+  # remove QC Warning rows
+  {.[str_detect(rownames(.),"^OID"),]}
+mode(mat) <- "double"
+
+anno <- read_xlsx(data_file, sheet = 2, skip = 1) %>% 
+  column_to_rownames("Patient ID")
+colnames(anno) <- make.names(colnames(anno))
+```
+
+# clean data
+```{r}
+anno <- select(anno,
+  Age, Sex, severity, molecular_sev_score = Molecular.Severity.score, Grading, outcome, Ethnicity,
+  BMI, Obesity, HeartRate, SPo2=SPo2., Smoker, Diabetes,
+  Hypertension, CAD, RespRate, Admission_Diag = Admission..Diagnosis, 
+  mech_ventil_intubation = Mechanical.ventilation..intubation, 
+  O2_supp = O2.supp, hospital_stay_days = Hospital.stay..days., 
+  Lymphocytes = Lymphocytes.....109.L., Neutrophils = Neutrophils.....109.L., 
+  CRP = CRP...mg.mL., Creatinine = Creatinine...mg.dL., WBC = WBC......109.L., 
+  Eosinophils = Eosinophils.....109.L., Glucose = Glucose...mmol.L., 
+  Hgb = Hgb...g.dL., PLT = PLT...per.mL., Monocytes = Monocytes.....109.L., 
+  Urea = Urea...mmol.L.
+) %>% 
+  filter(severity!="control")
+
+# order matrix columns according to annotation data.frame
+mat <- mat[,rownames(anno)]
+
+# map Olink IDs to gene names
+rownames(mat) <- data.frame(oid = rownames(mat)) %>% 
+  left_join(
+    read_xlsx(data_file, sheet = 1, skip = 1, n_max = 5, col_names = F) %>% 
+      as.matrix() %>% 
+      t() %>% 
+      data.frame() %>% 
+      remove_rownames() %>% 
+      select(X5, X2),
+    by=c("oid"="X5")
+  ) %>% 
+  pull(X2)
+
+# consistency check
+stopifnot(any(duplicated(rownames(mat)))==FALSE)
+stopifnot(all(rownames(anno)==colnames(mat)))
+```
+
+# export data
+```{r}
+saveRDS(mat, "data/assay.rds")
+saveRDS(anno, "data/metadata.rds")
+```
