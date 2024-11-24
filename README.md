@@ -24,9 +24,8 @@ theme_set(theme_cowplot())
 We use a dataset of 50 severe and 50 mild-moderate COVID-19 patients,
 for which 893 plasma proteins were profiled along with clinical
 covariates<sup>1</sup>. The data come in two parts. First, a proteins
-![\times](https://latex.codecogs.com/svg.latex?%5Ctimes "\times")
-patients matrix of protein abundance measurements, which are given by
-Olink normalized protein expression (NPX) values<sup>2</sup>.
+$\times$ patients matrix of protein abundance measurements, which are
+given by Olink normalized protein expression (NPX) values<sup>2</sup>.
 
 ``` r
 assay <- readRDS("data/assay.rds")
@@ -263,7 +262,7 @@ visualize the goodness of fit by plotting observed versus predicted
 values for each observation of the response. Since we did repeated cross
 cross validation, we can make this plot for each of the repeats. In our
 case, predicting disease grading gave mediocre results, with
-![R¹2\approx 0.75](https://latex.codecogs.com/svg.latex?R%C2%B92%5Capprox%200.75 "R¹2\approx 0.75").
+$R¹2\approx 0.75$.
 
 ``` r
 # R^2 per repeat
@@ -296,14 +295,13 @@ final_fit %>%
 style="width:95.0%" data-fig-align="center" />
 
 Second, we can show which features were the most important for the
-prediction. Unsurprisingly,
-![\text{O}\_2](https://latex.codecogs.com/svg.latex?%5Ctext%7BO%7D_2 "\text{O}_2")
-supplementation was the most important variable in our case study, as
-the amount of oxygen supply is the major factor based on which disease
-grading is carried out<sup>3</sup>. Interestingly, the most important
-gene to predict the disease grade is CTSL, which cleaves the S1 subunit
-of the SARS-CoV-2 spike protein and is essential for virus entry into
-the cell<sup>4</sup>.
+prediction. Unsurprisingly, $\text{O}_2$ supplementation was the most
+important variable in our case study, as the amount of oxygen supply is
+the major factor based on which disease grading is carried
+out<sup>3</sup>. Interestingly, the most important gene to predict the
+disease grade is CTSL, which cleaves the S1 subunit of the SARS-CoV-2
+spike protein and is essential for virus entry into the
+cell<sup>4</sup>.
 
 ``` r
 # feature importance

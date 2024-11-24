@@ -16,7 +16,7 @@ format:
     highlight-style: arrow
     page-layout: full
   gfm:
-    html-math-method: webtex
+    output-file: README.md
 knitr:
   opts_chunk:
     out.width: "75%"
